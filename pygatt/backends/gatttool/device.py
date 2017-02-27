@@ -28,6 +28,9 @@ class GATTToolBLEDevice(BLEDevice):
     """
     def __init__(self, address, backend):
         super(GATTToolBLEDevice, self).__init__(address)
+        self._primary_services = {}
+        self._characteristics_by_service = {}
+        self._descriptors_by_service = {}
         self._backend = backend
         self._connected = True
 
@@ -56,3 +59,18 @@ class GATTToolBLEDevice(BLEDevice):
     def discover_characteristics(self):
         self._characteristics = self._backend.discover_characteristics(self)
         return self._characteristics
+
+    @connection_required
+    def discover_characteristics_by_service(self, service_uuid):
+        self._characteristics_by_service[service_uuid] = self._backend.discover_characteristics_by_service(self, service_uuid)
+        return self._characteristics_by_service[service_uuid]
+
+    @connection_required
+    def discover_descriptors_by_service(self, service_uuid):
+        self._descriptors_by_service[service_uuid] = self._backend.discover_descriptors_by_service(self, service_uuid)
+        return self._descriptors_by_service[service_uuid]
+
+    @connection_required
+    def primary_services(self):
+        self._primary_services = self._backend.primary_services(self)
+        return self._primary_services

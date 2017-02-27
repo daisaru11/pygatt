@@ -19,7 +19,7 @@ except Exception as err:
         print("WARNING:", err, file=sys.stderr)
 
 from pygatt.exceptions import NotConnectedError, BLEError, NotificationTimeout
-from pygatt.backends import BLEBackend, Characteristic, BLEAddressType
+from pygatt.backends import BLEBackend, Characteristic, Service, Descriptor, BLEAddressType
 from pygatt.backends.backend import DEFAULT_CONNECT_TIMEOUT_S
 from .device import GATTToolBLEDevice
 
@@ -84,11 +84,26 @@ class GATTToolReceiver(threading.Thread):
             'value/descriptor': {
                 'patterns': [r'value/descriptor: .*? \r']
             },
+            'primary': {
+                'patterns': [
+                    r'attr handle: 0x([a-fA-F0-9]{4}), '
+                    'end grp handle: 0x([a-fA-F0-9]{4}) '
+                    'uuid: ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]'
+                    '{4}-[0-9a-f]{12})\r\n',  # noqa
+                ]
+            },
             'discover': {
                 'patterns': [
                     r'handle: 0x([a-fA-F0-9]{4}), '
                     'char properties: 0x[a-fA-F0-9]{2}, '
                     'char value handle: 0x([a-fA-F0-9]{4}), '
+                    'uuid: ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]'
+                    '{4}-[0-9a-f]{12})\r\n',  # noqa
+                ]
+            },
+            'discover-desc': {
+                'patterns': [
+                    r'handle: 0x([a-fA-F0-9]{4}), '
                     'uuid: ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]'
                     '{4}-[0-9a-f]{12})\r\n',  # noqa
                 ]
@@ -195,7 +210,10 @@ class GATTToolBackend(BLEBackend):
         self._gatttool_logfile = gatttool_logfile
         self._receiver = None
         self._con = None  # gatttool interactive session
+        self._primary_services = {}
         self._characteristics = {}
+        self._characteristics_by_service = {}
+        self._descriptors_by_service = {}
         self._running = threading.Event()
         self._address = None
         self._send_lock = threading.Lock()
@@ -413,6 +431,25 @@ class GATTToolBackend(BLEBackend):
         log.info('Bonding')
         self.sendline('sec-level medium')
 
+    def _save_primary_service_callback(self, event):
+        match = event["match"]
+        try:
+            attr_handle = int(match.group(1), 16)
+            end_grp_handle = int(match.group(2), 16)
+            uuid = match.group(3).strip().decode('ascii')
+            self._primary_services[UUID(uuid)] = Service(
+                uuid, attr_handle, end_grp_handle
+            )
+            log.debug(
+                "Found primary service %s, attr handle: 0x%x, end grp handle: 0x%x",
+                uuid,
+                attr_handle,
+                end_grp_handle
+            )
+        except AttributeError:
+            pass
+
+
     def _save_charecteristic_callback(self, event):
         match = event["match"]
         try:
@@ -428,6 +465,65 @@ class GATTToolBackend(BLEBackend):
             )
         except AttributeError:
             pass
+
+    def _save_charecteristic_callback_by_service(self, service_uuid):
+        def __save_charecteristic_callback(event):
+            match = event["match"]
+            try:
+                value_handle = int(match.group(2), 16)
+                char_uuid = match.group(3).strip().decode('ascii')
+                self._characteristics_by_service[service_uuid][UUID(char_uuid)] = Characteristic(
+                    char_uuid, value_handle
+                )
+                log.debug(
+                    "Found characteristic %s, value handle: 0x%x",
+                    char_uuid,
+                    value_handle
+                )
+            except AttributeError:
+                pass
+        return __save_charecteristic_callback
+
+    def _save_descriptor_callback_by_service(self, service_uuid):
+        def __save_descriptor_callback(event):
+            match = event["match"]
+            try:
+                handle = int(match.group(1), 16)
+                desc_uuid = match.group(2).strip().decode('ascii')
+                self._descriptors_by_service[service_uuid][UUID(desc_uuid)] = Descriptor(
+                    desc_uuid,
+                    handle
+                )
+                log.debug(
+                    "Found characteristic descriptor %s, handle: 0x%x",
+                    desc_uuid,
+                    handle
+                )
+            except AttributeError:
+                pass
+        return __save_descriptor_callback
+
+    @at_most_one_device
+    def primary_services(self):
+        self._primary_services = {}
+        self._receiver.register_callback(
+            "primary",
+            self._save_primary_service_callback,
+        )
+        self.sendline('primary')
+
+        max_time = time.time() + 5
+        while not self._primary_services and time.time() < max_time:
+            time.sleep(.5)
+
+        # Sleep one extra second in case we caught characteristic
+        # in the middle
+        time.sleep(1)
+
+        if not self._primary_services:
+            raise NotConnectedError("Primary service discovery failed")
+
+        return self._primary_services
 
     @at_most_one_device
     def discover_characteristics(self):
@@ -450,6 +546,70 @@ class GATTToolBackend(BLEBackend):
             raise NotConnectedError("Characteristic discovery failed")
 
         return self._characteristics
+
+    @at_most_one_device
+    def discover_characteristics_by_service(self, service_uuid):
+        if not isinstance(service_uuid, UUID):
+            service_uuid = UUID(service_uuid)
+
+        if service_uuid not in self._primary_services:
+            self.primary_services(self._connected_device)
+        if service_uuid not in self._primary_services:
+            raise NotConnectedError("Service %s not found" % service_uuid)
+
+        service = self._primary_services[service_uuid]
+
+        self._characteristics_by_service[service_uuid] = {}
+        self._receiver.register_callback(
+            "discover",
+            self._save_charecteristic_callback_by_service(service_uuid),
+        )
+        self.sendline('characteristics {0:02x} {1:02x}'.format(service.attr_handle, service.end_grp_handle))
+
+        max_time = time.time() + 5
+        while not self._characteristics_by_service[service_uuid] and time.time() < max_time:
+            time.sleep(.5)
+
+        # Sleep one extra second in case we caught characteristic
+        # in the middle
+        time.sleep(1)
+
+        if not self._characteristics_by_service[service_uuid]:
+            raise NotConnectedError("Characteristic discovery failed")
+
+        return self._characteristics_by_service[service_uuid]
+
+    @at_most_one_device
+    def discover_descriptors_by_service(self, service_uuid):
+        if not isinstance(service_uuid, UUID):
+            service_uuid = UUID(service_uuid)
+
+        if service_uuid not in self._primary_services:
+            self.primary_services(self._connected_device)
+        if service_uuid not in self._primary_services:
+            raise NotConnectedError("Service %s not found" % service_uuid)
+
+        service = self._primary_services[service_uuid]
+
+        self._descriptors_by_service[service_uuid] = {}
+        self._receiver.register_callback(
+            "discover-desc",
+            self._save_descriptor_callback_by_service(service_uuid),
+        )
+        self.sendline('char-desc {0:02x} {1:02x}'.format(service.attr_handle, service.end_grp_handle))
+
+        max_time = time.time() + 5
+        while not self._descriptors_by_service[service_uuid] and time.time() < max_time:
+            time.sleep(.5)
+
+        # Sleep one extra second in case we caught characteristic
+        # in the middle
+        time.sleep(1)
+
+        if not self._descriptors_by_service[service_uuid]:
+            raise NotConnectedError("Characteristics descriptor discovery failed")
+
+        return self._descriptors_by_service[service_uuid]
 
     def _handle_notification_string(self, event):
         msg = event["after"]

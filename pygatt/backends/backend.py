@@ -88,3 +88,23 @@ class Characteristic(object):
     def __str__(self):
         return "<%s uuid=%s handle=%d>" % (self.__class__.__name__,
                                            self.uuid, self.handle)
+
+
+class Service(object):
+    def __init__(self, uuid, attr_handle, end_grp_handle):
+        self.uuid = uuid
+        self.attr_handle = attr_handle
+        self.end_grp_handle = end_grp_handle
+
+    def __str__(self):
+        return "<%s uuid=%s attr_handle=%d end_grp_handle=%d>" % (self.__class__.__name__,
+                                           self.uuid, self.attr_handle, self.end_grp_handle)
+
+class Descriptor(object):
+    def __init__(self, uuid, handle):
+        self.uuid = uuid
+        self.handle = handle
+
+    def __str__(self):
+        return "<%s uuid=%s handle=%d>" % (self.__class__.__name__,
+                                           self.uuid, self.handle)
